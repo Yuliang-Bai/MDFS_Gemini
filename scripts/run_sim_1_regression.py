@@ -20,35 +20,67 @@ except NameError:
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-# 从模块中导入 Worker 函数
+from src.methods.regression.proposed import MDFSRegressor
+from src.methods.regression.baselines import AdaCoop, MSGLasso, SLRFS
 from src.simulations.regression import run_simulation_task
 
 # ==========================
-# 2. 实验配置
+# 2. 实验配置 (Experiment Config)
 # ==========================
 CONFIG = {
+    # --- 模拟环境参数 ---
     "n_repeats": 20,
     "n_cores": 4,
     "n_samples": 200,
-    "dims": [300, 300],
-    "noise": 1.0,
+    "dims": [300, 300],  # [Modality_1_Dim, Modality_2_Dim]
+    "noise": 0.5,
     "gamma": 0.7,
 
-    "mdfs_params": {"latent_dim": 10, "temperature": 0.5},
+    # --- MDFS 超参数 (MDFS Hyperparameters) ---
+    "mdfs_params": {
+        "latent_dim": 5,  # Joint Latent Z Dimension
+        "view_latent_dim": 10,  # View Latent R Dimension
+
+        # 【关键修改】网络拓扑结构 (Network Topology)
+        # 使用双重列表，分别对应 [Modality_1, Modality_2]
+
+        # 编码器结构 (Encoder Structure):
+        # View 1: Input -> Hidden_Layer_1(128) -> Hidden_Layer_2(64) -> R
+        # View 2: Input -> Hidden_Layer_1(128) -> Hidden_Layer_2(64) -> R
+        "encoder_struct": [
+            [128, 64],  # For View 1
+            [128, 64] # For View 2
+        ],
+
+        # 解码器结构 (Decoder Structure):
+        # 同样分别指定，或使用单层列表广播
+        # Joint Z -> Hidden_Layer_1(64) -> Output
+        "decoder_struct": [
+            [64, 128],  # For View 1 (Symmetric to encoder)
+            [64, 128]  # For View 2
+        ],
+
+        "temperature": 0.5,
+        "epochs": 200,
+        "lr": 1e-3,
+        "lambda_sp": 0.1
+    },
+
+    # --- 基准方法参数 ---
     "lasso_params": {},
     "slrfs_params": {}
 }
 
 if __name__ == "__main__":
     print(f"Starting Regression Simulation ({CONFIG['n_repeats']} repeats)...")
+    print(f"MDFS Topology:")
+    print(f"  - Encoder Structures: {CONFIG['mdfs_params']['encoder_struct']}")
+    print(f"  - Decoder Structures: {CONFIG['mdfs_params']['decoder_struct']}")
 
-    # 使用 partial 固定 config 参数，因为 map 只能传一个变动参数 (seed)
     task = partial(run_simulation_task, config=CONFIG)
 
     if CONFIG["n_cores"] > 1:
         with multiprocessing.Pool(CONFIG["n_cores"]) as pool:
-            # 这里的 imap 会自动去 pickle 'src.simulations.regression.run_simulation_task'
-            # 而不是 '__main__.run_single_trial'，从而解决 AttributeError
             results = list(tqdm(pool.imap(task, range(CONFIG["n_repeats"])), total=CONFIG["n_repeats"]))
     else:
         results = [task(seed) for seed in range(CONFIG["n_repeats"])]
