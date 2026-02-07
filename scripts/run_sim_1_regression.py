@@ -5,95 +5,100 @@ import pandas as pd
 from tqdm import tqdm
 from functools import partial
 
-# ==========================================================
-# 1. 路径修复
-# ==========================================================
+# Path Setup
 try:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 except NameError:
     current_dir = os.getcwd()
-    if os.path.basename(current_dir) == 'scripts':
-        project_root = os.path.abspath(os.path.join(current_dir, '..'))
-    else:
-        project_root = current_dir
-
-if project_root not in sys.path:
-    sys.path.append(project_root)
+    project_root = os.path.abspath(os.path.join(current_dir, '..')) if os.path.basename(
+        current_dir) == 'scripts' else current_dir
+if project_root not in sys.path: sys.path.append(project_root)
 
 from src.methods.regression.proposed import MDFSRegressor
 from src.methods.regression.baselines import AdaCoop, MSGLasso, SLRFS
 from src.simulations.regression import run_simulation_task
 
-# ==========================
-# 2. 实验配置 (Experiment Config)
-# ==========================
 CONFIG = {
-    # --- 模拟环境参数 ---
-    "n_repeats": 20,
-    "n_cores": 4,
-    "n_samples": 200,
-    "dims": [300, 300],  # [Modality_1_Dim, Modality_2_Dim]
-    "noise": 0.5,
-    "gamma": 0.7,
-
-    # --- MDFS 超参数 (MDFS Hyperparameters) ---
+    "n_repeats": 20, "n_cores": 4, "n_samples": 200, "dims": [300, 300],
+    "noise": 0.5, "gamma": 0.7,
     "mdfs_params": {
-        "latent_dim": 5,  # Joint Latent Z Dimension
-        "view_latent_dim": 10,  # View Latent R Dimension
-
-        # 【关键修改】网络拓扑结构 (Network Topology)
-        # 使用双重列表，分别对应 [Modality_1, Modality_2]
-
-        # 编码器结构 (Encoder Structure):
-        # View 1: Input -> Hidden_Layer_1(128) -> Hidden_Layer_2(64) -> R
-        # View 2: Input -> Hidden_Layer_1(128) -> Hidden_Layer_2(64) -> R
-        "encoder_struct": [
-            [128, 64],  # For View 1
-            [128, 64] # For View 2
-        ],
-
-        # 解码器结构 (Decoder Structure):
-        # 同样分别指定，或使用单层列表广播
-        # Joint Z -> Hidden_Layer_1(64) -> Output
-        "decoder_struct": [
-            [64, 128],  # For View 1 (Symmetric to encoder)
-            [64, 128]  # For View 2
-        ],
-
-        "temperature": 0.5,
-        "epochs": 200,
-        "lr": 1e-3,
-        "lambda_sp": 0.1
+        "latent_dim": 16, "view_latent_dim": 16,
+        "encoder_struct": [[128, 64], [64]],
+        "decoder_struct": [[64, 128], [64]],
+        "temperature": 0.5, "epochs": 160, "lr": 1e-3, "lambda_sp": 0.1
     },
-
-    # --- 基准方法参数 ---
-    "lasso_params": {},
-    "slrfs_params": {}
+    "lasso_params": {}, "slrfs_params": {}
 }
 
 if __name__ == "__main__":
-    print(f"Starting Regression Simulation ({CONFIG['n_repeats']} repeats)...")
-    print(f"MDFS Topology:")
-    print(f"  - Encoder Structures: {CONFIG['mdfs_params']['encoder_struct']}")
-    print(f"  - Decoder Structures: {CONFIG['mdfs_params']['decoder_struct']}")
+    print(f"Starting Simulation ({CONFIG['n_repeats']} repeats)...")
+    print(f" - MDFS Config: {CONFIG['mdfs_params']['encoder_struct']}")
+    print("-" * 50)
 
+    # 运行模拟
     task = partial(run_simulation_task, config=CONFIG)
-
     if CONFIG["n_cores"] > 1:
         with multiprocessing.Pool(CONFIG["n_cores"]) as pool:
-            results = list(tqdm(pool.imap(task, range(CONFIG["n_repeats"])), total=CONFIG["n_repeats"]))
+            results = list(tqdm(pool.imap(task, range(CONFIG['n_repeats'])), total=CONFIG['n_repeats']))
     else:
-        results = [task(seed) for seed in range(CONFIG["n_repeats"])]
+        results = [task(s) for s in range(CONFIG['n_repeats'])]
 
     df = pd.DataFrame(results)
 
-    print("\n=== Simulation Results (Average Recall) ===")
-    print(df[["MDFS", "AdaCoop", "MSGLasso", "SLRFS"]].mean())
-    print("\n=== Standard Deviation ===")
-    print(df[["MDFS", "AdaCoop", "MSGLasso", "SLRFS"]].std())
+    # ==========================================
+    # 数据汇总与格式化 (Formatting Report)
+    # ==========================================
+    print("\n" + "=" * 80)
+    print(" >>> Final Performance Report (Mean ± SD)")
+    print("=" * 80)
 
-    save_dir = os.path.join(project_root, "results")
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "sim_1_reg.csv")
-    df.to_csv(save_path, index=False)
-    print(f"\nDetails saved to {save_path}")
+    # 定义要展示的方法 (Rows)
+    methods = ["MDFS_Best", "MDFS_Final", "AdaCoop", "MSGLasso", "SLRFS"]
+
+    # 定义要展示的指标 (Columns)
+    # 假设有两个模态 view1, view2
+    metrics_to_show = [
+        "recall_total", "precision_total",
+        "recall_view1", "precision_view1",
+        "recall_view2", "precision_view2"
+    ]
+
+    summary_rows = []
+
+    for method in methods:
+        row_data = {"Method": method}
+        for metric in metrics_to_show:
+            col_name = f"{method}_{metric}"
+
+            # 检查列是否存在 (防止基准方法没有某些指标)
+            if col_name in df.columns:
+                mean_val = df[col_name].mean()
+                sd_val = df[col_name].std()
+                row_data[f"{metric}_Mean"] = mean_val
+                row_data[f"{metric}_SD"] = sd_val
+            else:
+                row_data[f"{metric}_Mean"] = 0.0
+                row_data[f"{metric}_SD"] = 0.0
+
+        summary_rows.append(row_data)
+
+    summary_df = pd.DataFrame(summary_rows)
+
+    # 设置显示格式，保留4位小数
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 1000)
+    pd.set_option('display.float_format', '{:.4f}'.format)
+
+    # 打印 MDFS 最佳 Epoch 统计
+    if "MDFS_Best_Epoch" in df.columns:
+        avg_epoch = df["MDFS_Best_Epoch"].mean()
+        std_epoch = df["MDFS_Best_Epoch"].std()
+        print(f"\n[Info] MDFS Average Best Epoch: {avg_epoch:.2f} ± {std_epoch:.2f}\n")
+
+    print(summary_df.set_index("Method"))
+
+    # 保存结果
+    save_path = os.path.join(project_root, "results", "sim_1_reg_summary.csv")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    summary_df.to_csv(save_path, index=False)
+    print(f"\nReport saved to {save_path}")

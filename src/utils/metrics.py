@@ -1,39 +1,43 @@
 import numpy as np
 from typing import Dict, List
-from sklearn.metrics import accuracy_score, normalized_mutual_info_score, adjusted_rand_score
 
-def calculate_recall(true_features: Dict[str, List[int]], 
-                     selected_features: Dict[str, List[int]]) -> Dict[str, float]:
-    """计算特征筛选查全率 (Recall)"""
+
+def calculate_selection_metrics(true_features: Dict[str, List[int]],
+                                selected_features: Dict[str, List[int]]) -> Dict[str, float]:
+    """
+    同时计算 Recall 和 Precision (包含 Total 和 Per-View)
+    """
     metrics = {}
+
     total_inter = 0
     total_true = 0
+    total_sel = 0
 
-    for modality, true_idxs in true_features.items():
-        true_set = set(true_idxs)
-        pred_set = set(selected_features.get(modality, []))
+    all_views = sorted(true_features.keys())
 
-        if len(true_set) == 0:
-            metrics[f"recall_{modality}"] = 1.0 if len(pred_set) == 0 else 0.0
-            continue
+    for modality in all_views:
+        true_idxs = set(true_features[modality])
+        pred_idxs = set(selected_features.get(modality, []))
 
-        intersection = len(true_set & pred_set)
-        metrics[f"recall_{modality}"] = intersection / len(true_set)
+        # Intersection
+        inter = len(true_idxs & pred_idxs)
+        n_true = len(true_idxs)
+        n_sel = len(pred_idxs)
 
-        total_inter += intersection
-        total_true += len(true_set)
+        total_inter += inter
+        total_true += n_true
+        total_sel += n_sel
 
+        # Per-View Metrics
+        metrics[f"recall_{modality}"] = inter / n_true if n_true > 0 else 0.0
+        metrics[f"precision_{modality}"] = inter / n_sel if n_sel > 0 else 0.0
+
+    # Total Metrics
     metrics["recall_total"] = total_inter / total_true if total_true > 0 else 0.0
+    metrics["precision_total"] = total_inter / total_sel if total_sel > 0 else 0.0
+
     return metrics
 
-def evaluate_regression(y_true, y_pred):
-    return np.mean((y_true - y_pred)**2)
 
-def evaluate_classification(y_true, y_pred):
-    return accuracy_score(y_true, y_pred)
-
-def evaluate_clustering(y_true, y_pred):
-    return {
-        "nmi": normalized_mutual_info_score(y_true, y_pred),
-        "ari": adjusted_rand_score(y_true, y_pred)
-    }
+# 保留旧接口以兼容旧代码 (可选)
+calculate_recall = calculate_selection_metrics
