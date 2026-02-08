@@ -23,9 +23,9 @@ CONFIG = {
     "noise": 0.5, "gamma": 0.7,
     "mdfs_params": {
         "latent_dim": 16, "view_latent_dim": 16,
-        "encoder_struct": [[128, 64], [64]],
-        "decoder_struct": [[64, 128], [64]],
-        "temperature": 0.5, "epochs": 160, "lr": 1e-3, "lambda_sp": 0.1
+        "encoder_struct": [[128, 64], [128, 64]],
+        "decoder_struct": [[64, 128], [64, 128]],
+        "temperature": 0.5, "epochs": 200, "lr": 1e-3, "lambda_sp": 0.1
     },
     "lasso_params": {}, "slrfs_params": {}
 }
