@@ -1,8 +1,159 @@
+import os
+import sys
 import numpy as np
-from sklearn.linear_model import ElasticNetCV, LassoCV, Ridge
-from sklearn.cross_decomposition import PLSRegression
+from copy import deepcopy
 from ...base import BaseMethod, FitResult
 
+
+# ==============================================================================
+# 【环境核心修复】 强制配置 Conda 内部 R 环境
+# ==============================================================================
+def setup_r_environment():
+    """
+    在导入 rpy2 之前，强制将当前 Conda 环境的 R 路径注入到环境变量中。
+    解决 'DLL Hell' 和 '.Internal(gettext)' 版本不匹配错误。
+    """
+    # 1. 获取当前 Conda 环境根目录 (例如 D:\Miniconda3\envs\r_msg)
+    conda_root = sys.prefix
+
+    # 2. 推导 R 的关键路径
+    # Conda R 通常位于 %PREFIX%\lib\R
+    r_home = os.path.join(conda_root, 'lib', 'R')
+    # R.dll 通常位于 %PREFIX%\lib\R\bin\x64
+    r_bin_x64 = os.path.join(r_home, 'bin', 'x64')
+
+    # 3. 验证路径是否存在
+    if not os.path.exists(r_home):
+        print(f"[Warning] 无法在当前环境中找到 R_HOME: {r_home}")
+        return False
+
+    # 4. 暴力设置环境变量 (覆盖系统设置)
+    os.environ['R_HOME'] = r_home
+    # Windows 下 rpy2 需要 R_USER，设为当前用户目录
+    os.environ['R_USER'] = os.path.expanduser('~')
+
+    # 5. 【最关键一步】将 R 的 bin 目录插到 PATH 的最前面
+    # 确保加载的是 Conda 的 R.dll，而不是系统其他地方的旧版 DLL
+    current_path = os.environ.get('PATH', '')
+    if r_bin_x64 not in current_path:
+        os.environ['PATH'] = r_bin_x64 + os.pathsep + current_path
+        print(f"[Info] 已强制注入 R 路径到 PATH 头部: {r_bin_x64}")
+
+    return True
+
+
+# 执行环境配置
+has_r_env = setup_r_environment()
+
+# ==============================================================================
+# 只有在环境配置完成后，才导入 rpy2 和 sklearn
+# ==============================================================================
+try:
+    import rpy2.robjects as robjects
+    from rpy2.robjects import numpy2ri
+    from rpy2.robjects.conversion import localconverter
+
+    # 定义 R 包装器函数
+    if has_r_env:
+        r_wrapper_code = """
+            run_msglasso_wrapper <- function(X, Y, group_ids) {
+                library(MSGLasso)
+
+                # ------------------------------------------------------------------
+                # 1. 动态修复 R 包 Bug (Pen_L -> Pen.L)
+                # ------------------------------------------------------------------
+                fix_msglasso_bug <- function() {
+                    # 获取源码
+                    fun_text <- deparse(MSGLasso)
+                    # 替换错误的变量名
+                    fun_text <- gsub("Pen_L", "Pen.L", fun_text)
+                    fun_text <- gsub("Pen_G", "Pen.G", fun_text)
+                    # 重新解析
+                    fixed_fun <- eval(parse(text = fun_text))
+                    environment(fixed_fun) <- environment(MSGLasso)
+                    return(fixed_fun)
+                }
+                # 获取修复后的函数
+                MSGLasso_Fixed <- fix_msglasso_bug()
+
+                # ------------------------------------------------------------------
+                # 2. 数据准备
+                # ------------------------------------------------------------------
+                X <- as.matrix(X)
+                Y <- as.matrix(Y)
+                p <- ncol(X)
+                q <- ncol(Y)
+
+                # 组结构
+                groups <- unique(group_ids)
+                G <- length(groups)
+
+                G.Starts <- c()
+                G.Ends <- c()
+                curr <- 1
+                for (g in groups) {
+                    len <- sum(group_ids == g)
+                    G.Starts <- c(G.Starts, curr)
+                    G.Ends <- c(G.Ends, curr + len - 1)
+                    curr <- curr + len
+                }
+
+                # 响应变量结构 (假设1组)
+                R_num <- 1
+                R.Starts <- c(1)
+                R.Ends <- c(q)
+
+                # 辅助矩阵计算
+                gmax <- 1 
+                cmax <- max(c(G.Ends - G.Starts + 1, R.Ends - R.Starts + 1))
+
+                pq <- FindingPQGrps(p, q, G, R_num, gmax, G.Starts, G.Ends, R.Starts, R.Ends)
+                PQ.grps <- pq$PQgrps
+
+                gr <- FindingGRGrps(p, q, G, R_num, cmax, G.Starts, G.Ends, R.Starts, R.Ends)
+                GR.grps <- gr$GRgrps
+
+                wts <- Cal_grpWTs(p, q, G, R_num, gmax, PQ.grps)
+                grp.WTs <- wts$grpWTs
+
+                # 惩罚项矩阵
+                Pen.L <- matrix(1, nrow=p, ncol=q)
+                Pen.G <- matrix(1, nrow=G, ncol=R_num)
+
+                # Lambda
+                lam1 <- 0.1
+                lam.G <- matrix(0.1, nrow=G, ncol=R_num)
+
+                # 【新增修复】 初始化 grp_Norm0
+                # 这是一个必传参数，表示 Beta0 的组范数。因为 Beta0 默认是 0，所以这里也全是 0
+                grp_Norm0 <- matrix(0, nrow=G, ncol=R_num)
+
+                # ------------------------------------------------------------------
+                # 3. 执行 (传入所有必填参数)
+                # ------------------------------------------------------------------
+                res <- MSGLasso_Fixed(X.m=X, Y.m=Y, grp.WTs=grp.WTs, 
+                                      Pen.L=Pen.L, Pen.G=Pen.G, 
+                                      PQ.grps=PQ.grps, GR.grps=GR.grps, 
+                                      grp_Norm0=grp_Norm0,   # <--- 之前缺了这个
+                                      lam1=lam1, lam.G=lam.G)
+
+                return(res$Beta)
+            }
+        """
+        try:
+            robjects.r(r_wrapper_code)
+        except Exception as e:
+            print(f"Warning: Failed to define R wrapper. Error: {e}")
+
+except ImportError:
+    pass
+
+from sklearn.linear_model import ElasticNetCV, LassoCV, Ridge, Lasso
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+from sklearn.cross_decomposition import PLSRegression
+import numpy as np
+from scipy.linalg import eigh, inv, norm
 
 class AdaCoop(BaseMethod):
     """
@@ -150,79 +301,239 @@ class AdaCoop(BaseMethod):
 
 class MSGLasso(BaseMethod):
     """
-    Baseline: Multivariate Sparse Group Lasso
+    Baseline: Multivariate Sparse Group Lasso (Wrapper for R package 'MSGLasso')
     """
 
     def __init__(self, name="MSGLasso", **kwargs):
         super().__init__(name=name, **kwargs)
+        self.r_available = has_r_env
 
     def fit(self, X: dict, y: np.ndarray) -> FitResult:
+        if not self.r_available:
+            return FitResult(selected_features={k: [] for k in X.keys()})
+
+        # 1. 准备数据
+        sorted_keys = sorted(X.keys())
+        X_concat = np.hstack([X[k] for k in sorted_keys])
+
+        # 构造组索引向量 (Python List)
+        # 例如: [1, 1, 1, 2, 2, 2, ...]
+        group_ids = []
+        feature_counts = []
+        for i, key in enumerate(sorted_keys):
+            n_cols = X[key].shape[1]
+            feature_counts.append(n_cols)
+            # R 是 1-based 索引，所以组号从 1 开始
+            group_ids.extend([i + 1] * n_cols)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        # 2. 调用 R 包装器
+        coef_matrix = None
+        try:
+            with localconverter(robjects.default_converter + numpy2ri.converter):
+                # 调用我们在上面定义的 R 函数 run_msglasso_wrapper
+                # 传入 X, Y 和 group_ids
+                # 注意: group_ids 会被自动转为 IntVector
+                r_group_ids = robjects.IntVector(group_ids)
+
+                # 调用 R 函数
+                result_beta = robjects.r['run_msglasso_wrapper'](X_concat, y, r_group_ids)
+                coef_matrix = np.array(result_beta)
+
+        except Exception as e:
+            print(f"Error executing MSGLasso R wrapper: {e}")
+            return FitResult(selected_features={k: [] for k in X.keys()})
+
+        # 3. 处理结果
+        # Beta 可能是 (p, q) 矩阵 (如果没有 path) 或者 (p, q, nlambda)
+        if coef_matrix is not None:
+            if coef_matrix.ndim == 3:
+                # 如果返回了路径，取中间值
+                idx = coef_matrix.shape[2] // 2
+                final_beta = coef_matrix[:, :, idx]
+            else:
+                final_beta = coef_matrix
+
+            feature_scores = np.linalg.norm(final_beta, axis=1)
+        else:
+            feature_scores = np.zeros(X_concat.shape[1])
+
+        # 4. 筛选特征
         n = len(y)
         k_total = int(n / np.log(n)) if n > 1 else 1
-
-        # 1. 计算组重要性 (使用 Ridge)
-        group_scores = {}
-        for name, data in X.items():
-            ridge = Ridge(alpha=1.0).fit(data, y)
-            group_scores[name] = np.linalg.norm(ridge.coef_)
-
-        total_score = sum(group_scores.values()) + 1e-8
+        top_idx = np.argsort(feature_scores)[::-1][:k_total]
 
         selected = {}
-        for name, data in X.items():
-            # 2. 分配名额
-            ratio = group_scores[name] / total_score
-            k_m = int(k_total * ratio)
-            k_m = max(1, k_m)
-
-            # 3. 组内筛选 (使用 LassoCV)
-            # 【关键修改】n_jobs=1，避免与外层多进程冲突
-            lasso = LassoCV(
-                cv=3,
-                random_state=42,
-                n_jobs=1,  # 修改此处：从 -1 改为 1
-                max_iter=2000
-            ).fit(data, y)
-
-            idx = np.argsort(np.abs(lasso.coef_))[::-1][:k_m]
-            selected[name] = idx.tolist()
+        curr = 0
+        for i, name in enumerate(sorted_keys):
+            dim = feature_counts[i]
+            sel = [idx - curr for idx in top_idx if curr <= idx < curr + dim]
+            selected[name] = sel
+            curr += dim
 
         return FitResult(selected_features=selected)
 
 
 class SLRFS(BaseMethod):
     """
-    Baseline: Sparse Low-Rank Feature Selection
+    Method: Sparse Low-Rank Feature Selection (SLR-FS)
+    Reference: Hu et al., "Low-rank feature selection for multi-view regression", 2017.
+
+    Implements Algorithm 1 from the paper:
+    Minimizes ||Y - X^T A B||_F^2 + lambda * ||A B||_{2,p}
     """
 
-    def __init__(self, name="SLRFS", **kwargs):
+    def __init__(self, name="SLRFS", r=5, p=1.0, lambda_=1.0, max_iter=100, tol=1e-5, **kwargs):
+        """
+        Args:
+            r (int): Rank of the low-rank constraint (subspace dimension).
+            p (float): Parameter for l2,p norm (0 < p < 2). Default is 1.0 for sparsity.
+            lambda_ (float): Regularization parameter.
+            max_iter (int): Maximum iterations for the optimization loop.
+            tol (float): Convergence tolerance.
+        """
         super().__init__(name=name, **kwargs)
+        self.r = r
+        self.p = p
+        self.lambda_ = lambda_
+        self.max_iter = max_iter
+        self.tol = tol
 
     def fit(self, X: dict, y: np.ndarray) -> FitResult:
-        sorted_keys = sorted(X.keys())
-        X_concat = np.hstack([X[k] for k in sorted_keys])
+        """
+        Fit the SLR-FS model for each view independently (as per Eq 7 in the paper).
+        """
+        # 1. 预处理 Y
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
 
-        n = len(y)
-        k_total = int(n / np.log(n)) if n > 1 else 1
+        # 标准化 Y (论文中提到 normalized class indicator matrix)
+        scaler_y = StandardScaler()
+        y_std = scaler_y.fit_transform(y)
 
-        # 1. 低秩分解
-        n_components = min(5, X_concat.shape[1], X_concat.shape[0] - 1)
-        pls = PLSRegression(n_components=n_components)
-        pls.fit(X_concat, y)
+        n_samples, n_classes = y_std.shape
 
-        # 2. 计算特征重要性
-        importance = np.sum(pls.x_loadings_ ** 2, axis=1)
+        # 确定筛选数量
+        k_total = int(n_samples / np.log(n_samples)) if n_samples > 1 else 1
 
-        # 3. 筛选
-        top_idx = np.argsort(importance)[::-1][:k_total]
+        selected_features = {}
 
-        selected = {}
-        curr = 0
-        for name in sorted_keys:
-            data = X[name]
-            dim = data.shape[1]
-            sel = [i - curr for i in top_idx if curr <= i < curr + dim]
-            selected[name] = sel
-            curr += dim
+        # 论文 Eq (7) 是对每个视图 v 分别优化的
+        for view_name, X_v in X.items():
+            # X_v: (n_samples, n_features)
+            # 论文中的 X 是 (n_features, n_samples)，所以涉及 X 的公式需要转置处理
 
-        return FitResult(selected_features=selected)
+            # 标准化 X
+            scaler_x = StandardScaler()
+            X_std = scaler_x.fit_transform(X_v)
+
+            # 转换为论文符号: X_paper (d x n), Y_paper (n x k)
+            # 代码中保持 sklearn 习惯 (n x d)，计算时做相应转置
+            # X (n, d)
+            n, d = X_std.shape
+
+            # 限制秩 r 不能超过特征数或类别数
+            rank_r = min(self.r, d, n_classes)
+
+            # --- Algorithm 1 ---
+
+            # 1. Initialization
+            # Random A (d, r), B (r, k)
+            np.random.seed(42)
+            A = np.random.randn(d, rank_r)
+            B = np.random.randn(rank_r, n_classes)
+            # D (d, d) Diagonal matrix initialized to Identity
+            d_diag = np.ones(d)
+
+            prev_obj = float('inf')
+
+            for t in range(self.max_iter):
+                # ---------------------------------------------------
+                # Step 1: Update A (Subspace Matrix) via Eq (14)
+                # Maximize Tr( (A^T (S_t + lambda D) A)^-1 A^T S_b A )
+                # This is a Generalized Eigenvalue Problem: S_b v = val (S_t + lambda D) v
+                # ---------------------------------------------------
+
+                # S_t = X X^T (paper) -> X.T @ X (here)
+                S_t = X_std.T @ X_std
+
+                # S_b = X Y Y^T X^T (paper) -> X.T @ Y @ Y.T @ X (here)
+                # 为了计算高效，先算 M = X.T @ Y
+                M = X_std.T @ y_std
+                S_b = M @ M.T
+
+                # Regularized Total Scatter: S_total = S_t + lambda * D
+                # D is diagonal
+                S_total = S_t + np.diag(self.lambda_ * d_diag)
+
+                # Solve generalized eigenvalue problem: S_b * v = w * S_total * v
+                # We need top r eigenvectors
+                try:
+                    vals, vecs = eigh(S_b, S_total, subset_by_index=(d - rank_r, d - 1))
+                    # eigh 返回的是升序，取最后 r 个，并反转顺序
+                    A_new = np.fliplr(vecs)
+                except Exception:
+                    # 如果 S_total 奇异，退化为普通特征值分解或加抖动
+                    vals, vecs = eigh(S_b)
+                    A_new = np.fliplr(vecs)[:, :rank_r]
+
+                A = A_new
+
+                # ---------------------------------------------------
+                # Step 2: Update B (Coefficient Matrix) via Eq (12)
+                # B = (A^T (X X^T + lambda D) A)^-1 A^T X Y
+                # ---------------------------------------------------
+                term1 = A.T @ S_total @ A
+                term2 = A.T @ M  # M = X.T @ Y
+
+                # Add small regularization to inversion for stability
+                term1_inv = inv(term1 + 1e-6 * np.eye(rank_r))
+                B = term1_inv @ term2
+
+                # ---------------------------------------------------
+                # Step 3: Update D (Weight Matrix) via Eq (8)
+                # d_ii = 1 / ( (2/p) * ||z^i||_2^(2-p) )
+                # z^i is the i-th row of Z = A @ B
+                # ---------------------------------------------------
+                Z = A @ B  # (d, k)
+                row_norms = norm(Z, axis=1)
+
+                # Avoid division by zero
+                row_norms = np.maximum(row_norms, 1e-8)
+
+                # Eq (8): d_ii = p / (2 * ||z||^(2-p))
+                # derived from paper: d_ii = 1 / ( (2/p) * ... )
+                exponent = 2.0 - self.p
+                d_diag = (self.p / 2.0) * (row_norms ** (self.p - 2.0))
+
+                # ---------------------------------------------------
+                # Check Convergence (Eq 7)
+                # Obj = ||Y - X^T A B||^2 + lambda * ||A B||_{2,p}
+                # ---------------------------------------------------
+                # Residual
+                Y_pred = X_std @ Z
+                loss = np.sum((y_std - Y_pred) ** 2)
+
+                # Regularization: sum( ||z^i||^p )
+                reg = np.sum(row_norms ** self.p)
+
+                obj = loss + self.lambda_ * reg
+
+                if abs(prev_obj - obj) < self.tol:
+                    break
+                prev_obj = obj
+
+            # --- Feature Selection ---
+            # 根据最终的系数矩阵 Z = AB 的行范数进行排序
+            # Row-sparsity: 重要的特征对应的行范数大，不重要的趋近于 0
+            Z_final = A @ B
+            feat_scores = norm(Z_final, axis=1)
+
+            # Select Top-K
+            # argsort 是升序，[::-1] 转降序
+            idx = np.argsort(feat_scores)[::-1][:k_total]
+            selected_features[view_name] = idx.tolist()
+
+        return FitResult(selected_features=selected_features)
