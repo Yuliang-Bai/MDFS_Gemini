@@ -6,45 +6,83 @@ from src.utils.metrics import calculate_selection_metrics
 
 
 def generate_ar_noise(n_samples: int, n_features: int, rho: float, rng) -> np.ndarray:
-    if rho == 0: return rng.standard_normal((n_samples, n_features))
+    """
+    生成符合 Σ_ij = rho^|i-j| 的噪声矩阵 E
+    """
+    if rho == 0:
+        return rng.standard_normal((n_samples, n_features))
+
     noise = np.zeros((n_samples, n_features))
+    # 初始特征 e_1 ~ N(0, 1)
     noise[:, 0] = rng.standard_normal(n_samples)
+
+    # 递归生成后续特征 e_j = rho * e_{j-1} + sqrt(1 - rho^2) * w_j
+    # 这样生成的序列满足 e_j ~ N(0, 1) 且 Corr(e_i, e_j) = rho^|i-j|
     scale = np.sqrt(1 - rho ** 2)
     white = rng.standard_normal((n_samples, n_features))
+
     for j in range(1, n_features):
         noise[:, j] = rho * noise[:, j - 1] + scale * white[:, j]
+
     return noise
 
 
 def generate_regression_data(n_samples: int = 200, n_features: List[int] = [300, 500],
-                             noise_level: float = 1.0, gamma: float = 0.7, rho: float = 0.5, seed: int = 42):
+                             noise_level: float = 1.0, gamma: float = 0.7, seed: int = 42):
+    """
+    符合数学公式 X(m) = X_sig(m) + E(m) 的数据生成函数
+    """
     rng = np.random.default_rng(seed)
     n_views = len(n_features)
-    k0 = 3;
-    ks = 2
+
+    # --- 1. 生成潜变量 (Latent Factors) ---
+    k0 = 3  # 共享维度
+    ks = 2  # 模态特定维度
     H0 = rng.standard_normal((n_samples, k0))
     H_specs = [rng.standard_normal((n_samples, ks)) for _ in range(n_views)]
+
+    # --- 2. 生成响应变量 y (Signal) ---
     beta0 = rng.uniform(1, 2, size=(k0, 1))
     y_signal = H0 @ beta0
-    for h in H_specs: y_signal += h @ rng.uniform(1, 2, size=(ks, 1))
-    y = y_signal.flatten() + rng.standard_normal(n_samples)
-    X_data = {};
+    for h in H_specs:
+        y_signal += h @ rng.uniform(1, 2, size=(ks, 1))
+    y = y_signal.flatten() + rng.standard_normal(n_samples)  # y 依然带有一点独立噪声
+
+    X_data = {}
     true_features = {}
-    n_active_shared = 5;
-    n_active_spec = 5
+    n_active_shared = 5  # 每模态共享特征数
+    n_active_spec = 5  # 每模态特定特征数
+
+    # 设定自相关系数 rho = 0.5
+    rho_val = 0.5
+
+    # --- 3. 为每个模态生成信号与自相关噪声 ---
     for i, p in enumerate(n_features):
         name = f"view{i + 1}"
+
+        # A. 确定真实特征索引 (Ground Truth)
         all_idx = np.arange(p)
         idx_shared = rng.choice(all_idx, n_active_shared, replace=False)
         rem_idx = np.setdiff1d(all_idx, idx_shared)
         idx_spec = rng.choice(rem_idx, n_active_spec, replace=False)
         true_features[name] = np.union1d(idx_shared, idx_spec).tolist()
+
+        # B. 生成模态信号 X_sig
         W0 = rng.standard_normal((k0, n_active_shared))
         Ws = rng.standard_normal((ks, n_active_spec))
         X_signal = np.zeros((n_samples, p))
         X_signal[:, idx_shared] += gamma * (H0 @ W0)
         X_signal[:, idx_spec] += (1 - gamma) * (H_specs[i] @ Ws)
-        X_data[name] = X_signal + generate_ar_noise(n_samples, p, rho, rng) * noise_level
+
+        # C. 生成自相关噪声 E(m)
+        # 这里直接调用你确认过的 AR(1) 噪声生成函数
+        # 它保证了每一行噪声向量 e ~ N(0, Σ)，且 Σ_ij = 0.5^|i-j|
+        E_m = generate_ar_noise(n_samples, p, rho_val, rng)
+
+        # D. 最终叠加: X(m) = X_sig(m) + E(m)
+        # noise_level 用于整体控制 E 的强弱（通常设为 1.0）
+        X_data[name] = X_signal + E_m * noise_level
+
     return X_data, y, true_features
 
 
