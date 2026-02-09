@@ -22,8 +22,8 @@ CONFIG = {
     "n_classes": 2, "noise": 1.0, "gamma": 0.7,
     "mdfs_params": {
         "latent_dim": 8, "view_latent_dim": 16,
-        "encoder_struct": [[128], [128]],
-        "decoder_struct": [[128], [128]],
+        "encoder_struct": [[128], [64]],
+        "decoder_struct": [[64], [128]],
         "temperature": 0.5, "epochs": 150, "lr": 5e-3,
         "lambda_sp": 0.1, "lambda_ent": 0.05
     },
