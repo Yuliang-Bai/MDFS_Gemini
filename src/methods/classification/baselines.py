@@ -1,112 +1,171 @@
 import numpy as np
-from sklearn.linear_model import ElasticNet, Lasso, LinearRegression
-from sklearn.cross_decomposition import PLSRegression
+from typing import Dict, List, Optional
+from math import floor, log
+from scipy.sparse import csgraph
+from sklearn.neighbors import kneighbors_graph
 from ...base import BaseMethod, FitResult
 
 
-class AdaCoop(BaseMethod):
-    """
-    Baseline: AdaCoop (Adaptive Cooperative Learning)
-    核心思想: 融合 Lasso 惩罚 (稀疏) 和 Agreement 惩罚 (协同)。
-    代理实现: ElasticNet (L1 + L2) 是 AdaCoop 在线性回归下的近似形式。
-    """
+class BaseMultiViewLineMethod(BaseMethod):
+    """线性方法基类"""
 
-    def fit(self, X, y):
-        # 1. 拼接所有模态
-        X_concat = np.hstack(list(X.values()))
-
-        # 2. 训练 ElasticNet
-        # alpha=0.1, l1_ratio=0.5 模拟协同与稀疏的平衡
-        model = ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42)
-        model.fit(X_concat, y)
-
-        # 3. 筛选 (取绝对值最大的 Top-K)
-        n = len(y)
-        k_total = int(n / np.log(n))
-
-        coefs = np.abs(model.coef_)
-        top_idx = np.argsort(coefs)[::-1][:k_total]
-
-        # 4. 映射回各模态
-        selected = {}
-        curr = 0
-        top_set = set(top_idx)
-        for name, data in X.items():
-            dim = data.shape[1]
-            # 检查当前模态区间内的索引是否被选中
-            sel = [i - curr for i in top_idx if curr <= i < curr + dim]
-            selected[name] = sel
-            curr += dim
-
-        return FitResult(selected_features=selected)
-
-
-class MSGLasso(BaseMethod):
-    """
-    Baseline: Multivariate Sparse Group Lasso
-    核心思想: 组稀疏 (模态层面) + 组内稀疏 (特征层面)。
-    代理实现: 
-    1. 计算每个模态的整体重要性 (Group Norm)。
-    2. 根据重要性分配筛选名额。
-    3. 组内使用 Lasso 进行筛选。
-    """
-
-    def fit(self, X, y):
-        n = len(y)
-        k_total = int(n / np.log(n))
-
-        # 1. 计算组重要性 (Group Importance)
-        group_scores = {}
-        for name, data in X.items():
-            # 使用 Ridge 回归系数的 L2 范数作为组重要性近似
-            lr = LinearRegression().fit(data, y)
-            group_scores[name] = np.linalg.norm(lr.coef_)
-
-        total_score = sum(group_scores.values()) + 1e-8
+    def _rank_and_select(self, weights: np.ndarray, X_dict: Dict[str, np.ndarray], n_samples: int):
+        k_total = max(1, floor(n_samples / log(n_samples)) if n_samples > 1 else 1)
+        # weights: (Total_Features, n_classes) or (Total_Features, )
+        if weights.ndim > 1:
+            scores = np.linalg.norm(weights, axis=1)  # L2 norm across classes
+        else:
+            scores = np.abs(weights)
 
         selected = {}
-        for name, data in X.items():
-            # 2. 分配名额
-            k_m = int(k_total * (group_scores[name] / total_score))
-            k_m = max(1, k_m)
+        current_idx = 0
+        feature_names = sorted(X_dict.keys())
+        total_dims = sum([v.shape[1] for v in X_dict.values()])
 
-            # 3. 组内筛选 (Lasso)
-            lasso = Lasso(alpha=0.05).fit(data, y)
-            idx = np.argsort(np.abs(lasso.coef_))[::-1][:k_m]
+        for name in feature_names:
+            dim = X_dict[name].shape[1]
+            w_view = scores[current_idx: current_idx + dim]
+
+            k_m = max(1, int(k_total * (dim / total_dims)))
+            idx = np.argsort(w_view)[::-1][:k_m]
             selected[name] = idx.tolist()
+            current_idx += dim
+        return selected
 
-        return FitResult(selected_features=selected)
 
-
-class SLRFS(BaseMethod):
+class SCFS(BaseMultiViewLineMethod):
     """
-    Baseline: Sparse Low-Rank Feature Selection
-    核心思想: 利用低秩矩阵分解捕捉相关性，同时进行稀疏选择。
-    代理实现: PLS (Partial Least Squares) 提取低秩成分，根据 Loadings 筛选。
+    Method 1: SCFS (Sharing Multi-view Feature Selection via ADMM) [Lin et al., 2019]
+    Objective: min_W ||XW - Y||_F^2 + lambda ||W||_2,1
     """
 
-    def fit(self, X, y):
-        X_concat = np.hstack(list(X.values()))
-        n = len(y)
-        k_total = int(n / np.log(n))
+    def __init__(self, name="SCFS", alpha=0.1, rho=1.0, max_iter=20, **kwargs):
+        super().__init__(name, **kwargs)
+        self.alpha = alpha
+        self.rho = rho
+        self.max_iter = max_iter
 
-        # 1. 低秩分解 (PLS with 5 components)
-        pls = PLSRegression(n_components=5)
-        pls.fit(X_concat, y)
+    def fit(self, X: Dict[str, np.ndarray], y: np.ndarray) -> FitResult:
+        feature_names = sorted(X.keys())
+        X_concat = np.hstack([X[k] for k in feature_names])
+        n, d = X_concat.shape
+        # 处理二分类或多分类
+        n_classes = len(np.unique(y))
+        if n_classes == 2:
+            # 二分类可以转为单列 -1/1 或 0/1
+            Y_target = y.reshape(-1, 1).astype(float)
+            Y_target[Y_target == 0] = -1  # 转换为 -1/1
+        else:
+            Y_target = np.eye(n_classes)[y]
 
-        # 2. 计算特征重要性 (Sum of squared loadings)
-        # x_loadings_: (n_features, n_components)
-        importance = np.sum(pls.x_loadings_ ** 2, axis=1)
+        # ADMM 求解 Group Lasso
+        W = np.zeros((d, Y_target.shape[1]))
+        Z = np.zeros_like(W)
+        U = np.zeros_like(W)
 
-        # 3. 筛选
-        top_idx = np.argsort(importance)[::-1][:k_total]
+        XtX = X_concat.T @ X_concat
+        XtY = X_concat.T @ Y_target
+        I = np.eye(d)
+        inv_mat = np.linalg.inv(XtX + self.rho * I)
 
-        selected = {}
-        curr = 0
-        for name, data in X.items():
-            dim = data.shape[1]
-            sel = [i - curr for i in top_idx if curr <= i < curr + dim]
-            selected[name] = sel
-            curr += dim
+        for _ in range(self.max_iter):
+            W = inv_mat @ (XtY + self.rho * (Z - U))
+            # Soft Thresholding for L2,1
+            V = W + U
+            v_norms = np.linalg.norm(V, axis=1, keepdims=True)
+            scale = np.maximum(0, 1 - self.alpha / (self.rho * v_norms + 1e-10))
+            Z = V * scale
+            U = U + W - Z
 
-        return FitResult(selected_features=selected)
+        return FitResult(selected_features=self._rank_and_select(Z, X, n))
+
+
+class HLRFS(BaseMultiViewLineMethod):
+    """
+    Method 2: HLRFS (Hypergraph Low-Rank Feature Selection) [Cheng et al., 2017]
+    Approximation: Graph Regularized L2,1 Selection
+    Objective: min_W ||XW - Y||^2 + beta * Tr(W'XLX'W) + gamma * ||W||_2,1
+    """
+
+    def __init__(self, name="HLRFS", beta=1.0, gamma=0.1, n_neighbors=5, **kwargs):
+        super().__init__(name, **kwargs)
+        self.beta = beta
+        self.gamma = gamma
+        self.n_neighbors = n_neighbors
+
+    def fit(self, X: Dict[str, np.ndarray], y: np.ndarray) -> FitResult:
+        feature_names = sorted(X.keys())
+        X_concat = np.hstack([X[k] for k in feature_names])
+        n, d = X_concat.shape
+        n_classes = len(np.unique(y))
+        Y_target = np.eye(n_classes)[y] if n_classes > 2 else y.reshape(-1, 1)
+
+        # Build Graph Laplacian
+        A = kneighbors_graph(X_concat, self.n_neighbors, mode='connectivity', include_self=False)
+        L = csgraph.laplacian(A, normed=False).toarray()
+
+        # Iterative Solver (Reweighted Least Squares)
+        W = np.random.randn(d, Y_target.shape[1]) * 0.01
+        XtX = X_concat.T @ X_concat
+        XLX = X_concat.T @ L @ X_concat
+        XtY = X_concat.T @ Y_target
+
+        for _ in range(15):  # Fast iter
+            w_norms = np.linalg.norm(W, axis=1)
+            D_diag = 0.5 / (w_norms + 1e-8)
+            # System: (XtX + beta*XLX + gamma*D) W = XtY
+            # Add small jitter to diagonal for stability
+            A_sys = XtX + self.beta * XLX + np.diag(self.gamma * D_diag) + 1e-6 * np.eye(d)
+            try:
+                W = np.linalg.solve(A_sys, XtY)
+            except:
+                break
+
+        return FitResult(selected_features=self._rank_and_select(W, X, n))
+
+
+class LSRFS(BaseMultiViewLineMethod):
+    """
+    Method 3: LSRFS (Locally Sparse Regularization) [Lin et al., 2022]
+    Core Idea: Feature selection with 'local' sparsity emphasis.
+    Implementation: Approximated as Elastic Net style or Reweighted L1/L2 scheme on View Blocks.
+    Here we implement a standard L2,1 + L1 regularized Least Squares to capture both global row sparsity
+    and local entry sparsity, which is the spirit of 'Locally Sparse'.
+    """
+
+    def __init__(self, name="LSRFS", lambda1=0.1, lambda2=0.1, max_iter=20, **kwargs):
+        super().__init__(name, **kwargs)
+        self.lambda1 = lambda1  # Controls L2,1 (Group/Row sparsity)
+        self.lambda2 = lambda2  # Controls L1 (Local sparsity)
+        self.max_iter = max_iter
+
+    def fit(self, X: Dict[str, np.ndarray], y: np.ndarray) -> FitResult:
+        # PGD (Proximal Gradient Descent) solver
+        feature_names = sorted(X.keys())
+        X_concat = np.hstack([X[k] for k in feature_names])
+        n, d = X_concat.shape
+        n_classes = len(np.unique(y))
+        Y_target = np.eye(n_classes)[y] if n_classes > 2 else y.reshape(-1, 1)
+
+        W = np.zeros((d, Y_target.shape[1]))
+        lr = 1e-3
+
+        for _ in range(self.max_iter):
+            # Gradient of Data Term: X.T(XW - Y)
+            grad = X_concat.T @ (X_concat @ W - Y_target)
+
+            # Gradient Descent
+            W_temp = W - lr * grad
+
+            # Proximal Operator for L1 (Local Sparse)
+            # Soft Thresholding element-wise
+            W_temp = np.sign(W_temp) * np.maximum(np.abs(W_temp) - lr * self.lambda2, 0)
+
+            # Proximal Operator for L2,1 (Group Sparse)
+            # Block Soft Thresholding row-wise
+            row_norms = np.linalg.norm(W_temp, axis=1, keepdims=True)
+            # Avoid division by zero
+            scale = np.maximum(0, 1 - (lr * self.lambda1) / (row_norms + 1e-8))
+            W = W_temp * scale
+
+        return FitResult(selected_features=self._rank_and_select(W, X, n))
