@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Tuple, Dict, List, Any
 from src.methods.classification.proposed import MDFSClassifier
-from src.methods.classification.baselines import SCFS, HLRFS, LSRFS
+from src.methods.classification.baselines import SMVFS, HLRFS, SCFS
 from src.utils.metrics import calculate_selection_metrics
 
 
@@ -31,17 +31,17 @@ def generate_classification_data(n_samples: int = 200, n_features: List[int] = [
     n_views = len(n_features)
 
     # --- 1. 生成潜变量 (Latent Factors) - 与 Regression 保持一致 ---
-    k0 = 5  # 共享维度
+    k0 = 3  # 共享维度
     ks = 2  # 模态特定维度
     H0 = rng.standard_normal((n_samples, k0))
     H_specs = [rng.standard_normal((n_samples, ks)) for _ in range(n_views)]
 
     # --- 2. 生成 Logit 响应变量 y ---
     # 生成线性部分 (Linear Response)
-    beta0 = rng.uniform(0.5, 1.5, size=(k0, 1))
+    beta0 = rng.uniform(1, 2, size=(k0, 1))
     linear_response = H0 @ beta0
     for h in H_specs:
-        linear_response += h @ rng.uniform(0.5, 1.5, size=(ks, 1))
+        linear_response += h @ rng.uniform(1, 2, size=(ks, 1))
 
     # 转换为概率 (Sigmoid)
     logits = linear_response.flatten()
@@ -117,12 +117,12 @@ def run_simulation_task_cls(seed: int, config: Dict[str, Any]) -> Dict[str, Any]
         for k in ["recall_total", "precision_total"]:
             res[f"MDFS_Final_{k}"] = 0.0
 
-    # --- 2. Baselines (SCFS, HLRFS, LSRFS) ---
+    # --- 2. Baselines (SMVFS, HLRFS, SCFS) ---
     # 注意: 大多数基准方法对二分类同样适用 (Treat labels as regression target or class indicator)
     for name, Cls, params in [
-        ("SCFS", SCFS, config["scfs_params"]),
+        ("SMVFS", SMVFS, config["smvfs_params"]),
         ("HLRFS", HLRFS, config["hlrfs_params"]),
-        ("LSRFS", LSRFS, config["lsrfs_params"])
+        ("SCFS", SCFS, config["scfs_params"])
     ]:
         try:
             m = Cls(**params)

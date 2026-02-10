@@ -21,15 +21,15 @@ CONFIG = {
     "n_samples": 200, "dims": [300, 300],
     "n_classes": 2, "noise": 1.0, "gamma": 0.7,
     "mdfs_params": {
-        "latent_dim": 8, "view_latent_dim": 16,
-        "encoder_struct": [[128], [64]],
-        "decoder_struct": [[64], [128]],
-        "temperature": 0.5, "epochs": 150, "lr": 5e-3,
+        "latent_dim": 5, "view_latent_dim": 10,
+        "encoder_struct": [[128, 64], [128, 64]],
+        "decoder_struct": [[64, 128], [64, 128]],
+        "temperature": 0.5, "epochs": 200, "lr": 1e-2,
         "lambda_sp": 0.1, "lambda_ent": 0.05
     },
-    "scfs_params": {"alpha": 0.5, "rho": 1.0, "max_iter": 50},
+    "smvfs_params": {"alpha": 0.5, "rho": 1.0, "max_iter": 50},
     "hlrfs_params": {"beta": 1.0, "gamma": 0.5, "n_neighbors": 5},
-    "lsrfs_params": {"lambda1": 0.1, "lambda2": 0.1, "max_iter": 30}
+    "scfs_params": {"lambda1": 0.1, "lambda2": 0.1, "max_iter": 50}
 }
 
 if __name__ == "__main__":
@@ -46,39 +46,61 @@ if __name__ == "__main__":
 
     df = pd.DataFrame(results)
 
-    print("\n" + "=" * 80)
-    print(" >>> Final Classification Report (Mean ± SD)")
-    print("=" * 80)
+    # --- Generate Detailed Report (Matches Regression Style) ---
+    print("\n" + "=" * 120)
+    print(f" >>> Final Classification Performance (Mean(SD)) over {CONFIG['n_repeats']} runs")
+    print("=" * 120)
 
-    methods = ["MDFS_Best", "MDFS_Final", "SCFS", "HLRFS", "LSRFS"]
-    metrics_to_show = ["recall_total", "precision_total"]
+    methods = ["MDFS_Best", "MDFS_Final", "SMVFS", "HLRFS", "SCFS"]
+
+    # 1. 动态识别所有相关的指标列 (Total + Per-View)
+    # 假设 metrics.py 返回的 key 格式包含 'recall' 或 'precision'
+    # 例如: 'view1_recall', 'view2_precision', 'recall_total' 等
+    all_metric_cols = [c for c in df.columns if ('recall' in c or 'precision' in c) and 'MDFS_Final' in c]
+
+    # 去掉前缀 'MDFS_Final_' 以获取通用的指标名
+    base_metric_names = sorted(list(set([c.replace('MDFS_Final_', '') for c in all_metric_cols])))
+
+
+    # 排序优化：把 'total' 放在前面，其他按字母顺序 (view1, view2...)
+    def sort_key(name):
+        if 'total' in name: return '0_' + name  # Ensure total comes first
+        return '1_' + name
+
+
+    base_metric_names.sort(key=sort_key)
 
     summary_rows = []
+
     for method in methods:
         row_data = {"Method": method}
-        for metric in metrics_to_show:
-            col_name = f"{method}_{metric}"
+        for base_metric in base_metric_names:
+            col_name = f"{method}_{base_metric}"
+
             if col_name in df.columns:
                 mean_val = df[col_name].mean()
                 sd_val = df[col_name].std()
-                row_data[f"{metric}_Mean"] = mean_val
-                row_data[f"{metric}_SD"] = sd_val
+                # 格式化输出: Mean ± SD
+                row_data[base_metric] = f"{mean_val:.4f}({sd_val:.4f})"
             else:
-                row_data[f"{metric}_Mean"] = 0.0
-                row_data[f"{metric}_SD"] = 0.0
+                row_data[base_metric] = "N/A"
         summary_rows.append(row_data)
 
     summary_df = pd.DataFrame(summary_rows)
+
+    # 调整列顺序: Method 在第一列
+    cols = ["Method"] + [c for c in summary_df.columns if c != "Method"]
+    summary_df = summary_df[cols]
+
+    # 设置 Pandas 显示参数以完整打印表格
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', 1000)
-    pd.set_option('display.float_format', '{:.4f}'.format)
+    pd.set_option('display.colheader_justify', 'center')
 
-    if "MDFS_Best_Epoch" in df.columns:
-        print(f"\n[Info] MDFS Avg Best Epoch: {df['MDFS_Best_Epoch'].mean():.2f}")
+    print(summary_df.to_string(index=False))
 
-    print(summary_df.set_index("Method"))
-
+    # 保存结果
     save_path = os.path.join(project_root, "results", "sim_2_cls_summary.csv")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     summary_df.to_csv(save_path, index=False)
-    print(f"\nSaved: {save_path}")
+    print(f"\nReport saved to {save_path}")
