@@ -1,8 +1,6 @@
 import sys
 import os
 import multiprocessing
-import pandas as pd
-from tqdm import tqdm
 from functools import partial
 
 try:
@@ -13,7 +11,7 @@ except NameError:
         current_dir) == 'scripts' else current_dir
 if project_root not in sys.path: sys.path.append(project_root)
 
-from src.simulations.classification import run_simulation_task_cls
+from src.utils.parallel import configure_for_multiprocessing, worker_init
 
 # 配置: 01 分布 (n_classes=2)
 CONFIG = {
@@ -32,6 +30,12 @@ CONFIG = {
     "scfs_params": {"lambda1": 0.1, "lambda2": 0.1, "max_iter": 50}
 }
 
+configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)
+
+import pandas as pd
+from tqdm import tqdm
+from src.simulations.classification import run_simulation_task_cls
+
 if __name__ == "__main__":
     print(f"Starting Classification Sim (Repeats: {CONFIG['n_repeats']}, Classes: {CONFIG['n_classes']})...")
     print("-" * 60)
@@ -39,7 +43,8 @@ if __name__ == "__main__":
     task = partial(run_simulation_task_cls, config=CONFIG)
 
     if CONFIG["n_cores"] > 1:
-        with multiprocessing.Pool(CONFIG["n_cores"]) as pool:
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(CONFIG["n_cores"], initializer=worker_init) as pool:
             results = list(tqdm(pool.imap(task, range(CONFIG['n_repeats'])), total=CONFIG['n_repeats']))
     else:
         results = [task(s) for s in range(CONFIG['n_repeats'])]

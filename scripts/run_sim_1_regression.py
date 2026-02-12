@@ -1,8 +1,7 @@
 import sys
 import os
 import multiprocessing
-import pandas as pd
-from tqdm import tqdm
+
 from functools import partial
 
 # Path Setup
@@ -14,9 +13,7 @@ except NameError:
         current_dir) == 'scripts' else current_dir
 if project_root not in sys.path: sys.path.append(project_root)
 
-from src.methods.regression.proposed import MDFSRegressor
-from src.methods.regression.baselines import AdaCoop, MSGLasso, SLRFS
-from src.simulations.regression import run_simulation_task
+from src.utils.parallel import configure_for_multiprocessing, worker_init
 
 CONFIG = {
     "n_repeats": 20, "n_cores": 4, "n_samples": 200, "dims": [300, 300],
@@ -25,10 +22,19 @@ CONFIG = {
         "latent_dim": 5, "view_latent_dim": 10,
         "encoder_struct": [[128, 64], [128, 64]],
         "decoder_struct": [[64, 128], [64, 128]],
-        "temperature": 0.5, "epochs": 200, "lr": 5e-3, "lambda_sp": 0.1
+        "temperature": 0.5, "epochs": 600, "lr": 1e-3,
+        "lambda_r": 3, "lambda_ent": 0.05, "lambda_sp": 0.5
     },
     "lasso_params": {}, "slrfs_params": {}
 }
+
+configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)
+
+import pandas as pd
+from tqdm import tqdm
+from src.methods.regression.proposed import MDFSRegressor
+from src.methods.regression.baselines import AdaCoop, MSGLasso, SLRFS
+from src.simulations.regression import run_simulation_task
 
 if __name__ == "__main__":
     print(f"Starting Simulation ({CONFIG['n_repeats']} repeats)...")
@@ -38,7 +44,8 @@ if __name__ == "__main__":
     # 运行模拟
     task = partial(run_simulation_task, config=CONFIG)
     if CONFIG["n_cores"] > 1:
-        with multiprocessing.Pool(CONFIG["n_cores"]) as pool:
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(CONFIG["n_cores"], initializer=worker_init) as pool:
             results = list(tqdm(pool.imap(task, range(CONFIG['n_repeats'])), total=CONFIG['n_repeats']))
     else:
         results = [task(s) for s in range(CONFIG['n_repeats'])]

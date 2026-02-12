@@ -9,6 +9,9 @@ from math import floor, log
 from ...base import BaseMethod, FitResult
 from ...utils.metrics import calculate_selection_metrics
 
+# ==========================================
+# 1. 设备与基础模块
+# ==========================================
 def get_device() -> str:
     if torch.cuda.is_available(): return "cuda"
     try:
@@ -35,17 +38,16 @@ class MLPBlock(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# ==========================================
+# 2. MDFS 核心类 (Clustering)
+# ==========================================
 class MDFSClustering(BaseMethod):
-    """
-    Unsupervised MDFS for Multi-view Clustering Feature Selection.
-    Removes the predictive head, relies on Reconstruction + Information Bottleneck (Entropy/Sparsity).
-    """
-    def __init__(self, name="MDFS_Clust",
+    def __init__(self, name="MDFS_Clu",
                  latent_dim: int = 16, view_latent_dim: int = 16,
                  encoder_struct: Union[List[int], List[List[int]]] = [64, 32],
                  decoder_struct: Union[List[int], List[List[int]]] = [32, 64],
                  dropout: float = 0.0,
-                 lr: float = 1e-3, epochs: int = 100, batch_size: int = 32, temperature: float = 0.7,
+                 lr: float = 1e-3, epochs: int = 100, temperature: float = 0.7,
                  lambda_r: float = 1.0, lambda_ent: float = 0.05, lambda_sp: float = 0.05,
                  **kwargs):
         super().__init__(name, **kwargs)
@@ -56,7 +58,6 @@ class MDFSClustering(BaseMethod):
         self.dropout = dropout
         self.lr = lr
         self.epochs = epochs
-        self.batch_size = batch_size
         self.temperature = temperature
         self.lambda_r = lambda_r
         self.lambda_ent = lambda_ent
@@ -67,7 +68,7 @@ class MDFSClustering(BaseMethod):
         self.decoders = nn.ModuleDict()
         self.gating_net = None
         self.compress_net = None
-        self.modality_names = []
+        # 聚类任务通常没有预测头 (Predict Net)，主要是无监督重构
 
     def _parse_struct_config(self, struct_config, num_views):
         if not struct_config: return [[] for _ in range(num_views)]
@@ -127,13 +128,16 @@ class MDFSClustering(BaseMethod):
     def fit(self, X: Dict[str, np.ndarray], y: Optional[np.ndarray] = None,
             true_features: Optional[Dict[str, List[int]]] = None,
             verbose: bool = False) -> FitResult:
-
+        """
+        :param verbose: 是否打印训练日志
+        """
         input_dims = {k: v.shape[1] for k, v in X.items()}
-        # 这里的 n_samples 取自数据本身
+        # 如果没有 y，取 X 的样本数
         n_samples = list(X.values())[0].shape[0]
         self._init_networks(input_dims, DEVICE)
 
         X_t = {k: torch.tensor(v, dtype=torch.float32).to(DEVICE) for k, v in X.items()}
+
         criterion_rec = nn.MSELoss()
 
         params = list(self.encoders.parameters()) + list(self.decoders.parameters()) + \
@@ -146,9 +150,11 @@ class MDFSClustering(BaseMethod):
         self.encoders.train(); self.decoders.train()
         self.gating_net.train(); self.compress_net.train()
 
+        # [日志] 格式对齐 Regression/Classification
         if verbose:
-            print(f"\n[{self.name}] Start Unsupervised Training (Epochs: {self.epochs})...")
-            print(f"{'Epoch':<6} | {'Tot_Loss':<10} | {'Rec_Loss':<10} | {'Ent_Loss':<10} | {'Sp_Loss':<10} | {'Recall':<8}")
+            print(f"\n[{self.name}] Start Training (Total Epochs: {self.epochs})...")
+            # 聚类没有 Pred_Loss，所以只显示 Rec_Loss, Ent_Loss, Sp_Loss
+            print(f"{'Epoch':<6} | {'Tot_Loss':<10} | {'Rec_Loss':<10} | {'Ent_Loss':<10} | {'Sp_Loss':<10} | {'Rec_Tot':<8}")
             print("-" * 75)
 
         for epoch in range(1, self.epochs + 1):
@@ -167,12 +173,12 @@ class MDFSClustering(BaseMethod):
 
             recon_loss = sum([criterion_rec(self.decoders[name](z), X_t[name]) for name in self.modality_names]) / len(self.modality_names)
 
-            # 无监督 Loss = Reconstruct + Regularization
+            # 总损失 (无监督)
             total_loss = self.lambda_r * recon_loss + self.lambda_ent * loss_ent + self.lambda_sp * loss_sp
             total_loss.backward()
             optimizer.step()
 
-            # Tracking (需要 true_features 才能计算 Recall)
+            # Tracking & Logging
             if true_features and (epoch % 20 == 0 or epoch == self.epochs):
                 self.encoders.eval(); self.compress_net.eval(); self.gating_net.eval()
                 with torch.no_grad():

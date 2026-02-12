@@ -1,9 +1,8 @@
 import numpy as np
 from scipy.linalg import eigh, norm
-from scipy.sparse import csgraph
 from sklearn.cluster import KMeans
-from sklearn.base import BaseEstimator, ClusterMixin
-from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from typing import Dict, List, Optional
 from ...base import BaseMethod, FitResult
 

@@ -1,8 +1,6 @@
 import sys
 import os
 import multiprocessing
-import pandas as pd
-from tqdm import tqdm
 from functools import partial
 
 # --- Path Setup ---
@@ -14,7 +12,7 @@ except NameError:
         current_dir) == 'scripts' else current_dir
 if project_root not in sys.path: sys.path.append(project_root)
 
-from src.simulations.clustering import run_simulation_task_clu
+from src.utils.parallel import configure_for_multiprocessing, worker_init
 
 # --- Configuration ---
 CONFIG = {
@@ -22,16 +20,15 @@ CONFIG = {
     "n_repeats": 20,
     "n_cores": 4,
     "n_samples": 200,
-    "dims": [300, 300],
+    "dims": [100, 100],
     "n_clusters": 3,
     "mdfs_params": {
         "latent_dim": 5,
         "view_latent_dim": 10,
         "encoder_struct": [[128, 64], [128, 64]],
         "decoder_struct": [[64, 128], [64, 128]],
-        "epochs": 200,
-        "lr": 1e-3,
-        "batch_size": 32,
+        "epochs": 600,
+        "lr": 5e-2,
         "lambda_r": 1.0,
         "lambda_ent": 0.05,
         "lambda_sp": 0.05,
@@ -42,42 +39,55 @@ CONFIG = {
     "nsgl_params": {"n_clusters": 3, "alpha": 0.1}
 }
 
+configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)
+
+import pandas as pd
+from tqdm import tqdm
+from src.simulations.clustering import run_simulation_task_clu
+
+# ==========================================
+# 3. 主程序 (Main Execution)
+# ==========================================
 if __name__ == "__main__":
     print(f"Starting {CONFIG['task_name']} (Repeats: {CONFIG['n_repeats']}, Cores: {CONFIG['n_cores']})...")
     print(f"Config: Dims={CONFIG['dims']}, Samples={CONFIG['n_samples']}")
     print("-" * 60)
 
+    # 1. 准备并行任务
     task = partial(run_simulation_task_clu, config=CONFIG)
 
+    # 2. 执行并行计算 (带进度条)
     if CONFIG["n_cores"] > 1:
-        with multiprocessing.Pool(CONFIG["n_cores"]) as pool:
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(CONFIG["n_cores"], initializer=worker_init) as pool:
+            # imap + tqdm 实现进度条
             results = list(tqdm(pool.imap(task, range(CONFIG['n_repeats'])), total=CONFIG['n_repeats']))
     else:
-        results = [task(s) for s in range(CONFIG['n_repeats'])]
+        # 单核调试模式
+        results = [task(s) for s in tqdm(range(CONFIG['n_repeats']))]
 
+    # 3. 结果转换为 DataFrame
     df = pd.DataFrame(results)
 
-    # =========================================================================
-    # Generate Detailed Report (Matches Classification Style)
-    # =========================================================================
-    print("\n" + "=" * 120)
+    # ==========================================
+    # 4. 生成最终报告 (Mean ± SD)
+    # ==========================================
+    print("\n" + "=" * 100)
     print(f" >>> Final Clustering Performance (Mean(SD)) over {CONFIG['n_repeats']} runs")
-    print("=" * 120)
+    print("=" * 100)
 
-    # 聚类任务的方法列表 (无监督一般没有 Validation Best 概念，只取 Final)
-    methods = ["MDFS_Final", "MCFL", "MRAG", "NSGL"]
+    # 定义要展示的方法 (包含 MDFS_Best)
+    methods = ["MDFS_Best", "MDFS_Final", "MCFL", "MRAG", "NSGL"]
 
-    # 1. 动态识别所有相关的指标列 (Total + Per-View)
-    # 查找所有包含 MDFS_Final 且包含 recall 或 precision 的列
+    # 动态识别指标列 (以 MDFS_Final 为基准，查找 recall/precision 相关列)
     all_metric_cols = [c for c in df.columns if ('recall' in c or 'precision' in c) and 'MDFS_Final' in c]
-
-    # 去掉前缀 'MDFS_Final_' 以获取通用的指标名
+    # 去掉前缀，获取基础指标名 (e.g., 'recall_total', 'view1_precision')
     base_metric_names = sorted(list(set([c.replace('MDFS_Final_', '') for c in all_metric_cols])))
 
 
-    # 排序优化：把 'total' 放在前面，其他按字母顺序
+    # 排序优化：确保 'total' 指标排在 'view' 指标前面
     def sort_key(name):
-        if 'total' in name: return '0_' + name  # Ensure total comes first
+        if 'total' in name: return '0_' + name
         return '1_' + name
 
 
@@ -93,7 +103,7 @@ if __name__ == "__main__":
             if col_name in df.columns:
                 mean_val = df[col_name].mean()
                 sd_val = df[col_name].std()
-                # 格式化输出: Mean(SD)
+                # 格式化: Mean(SD)
                 row_data[base_metric] = f"{mean_val:.4f}({sd_val:.4f})"
             else:
                 row_data[base_metric] = "N/A"
@@ -113,13 +123,16 @@ if __name__ == "__main__":
 
     print(summary_df.to_string(index=False))
 
-    # 保存结果
-    save_path = os.path.join(project_root, "results", "sim_3_clu_summary.csv")
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    # 5. 保存结果
+    results_dir = os.path.join(project_root, "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    # 保存汇总表格
+    save_path = os.path.join(results_dir, "sim_3_clu_summary.csv")
     summary_df.to_csv(save_path, index=False)
 
-    # 同时也保存原始数据
-    raw_path = os.path.join(project_root, "results", "sim_3_clu_raw.csv")
+    # 保存原始数据 (Raw)
+    raw_path = os.path.join(results_dir, "sim_3_clu_raw.csv")
     df.to_csv(raw_path, index=False)
 
-    print(f"\nReport saved to {save_path}")
+    print(f"\nReport saved to: {save_path}")

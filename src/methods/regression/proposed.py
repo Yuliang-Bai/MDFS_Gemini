@@ -51,7 +51,7 @@ class MDFSRegressor(BaseMethod):
                  encoder_struct: Union[List[int], List[List[int]]] = [64, 32],
                  decoder_struct: Union[List[int], List[List[int]]] = [32, 64],
                  dropout: float = 0.0,
-                 lr: float = 1e-3, epochs: int = 100, batch_size: int = 32, temperature: float = 0.7,
+                 lr: float = 1e-3, epochs: int = 100,  temperature: float = 0.7,
                  lambda_r: float = 1.0, lambda_ent: float = 0.05, lambda_sp: float = 0.05,
                  **kwargs):
         super().__init__(name, **kwargs)
@@ -62,7 +62,6 @@ class MDFSRegressor(BaseMethod):
         self.dropout = dropout
         self.lr = lr
         self.epochs = epochs
-        self.batch_size = batch_size
         self.temperature = temperature
         self.lambda_r = lambda_r
         self.lambda_ent = lambda_ent
