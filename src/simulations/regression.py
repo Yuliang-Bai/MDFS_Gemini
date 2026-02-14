@@ -5,26 +5,21 @@ from src.methods.regression.baselines import AdaCoop, MSGLasso, SLRFS
 from src.utils.metrics import calculate_selection_metrics
 
 
-def generate_ar_noise(n_samples: int, n_features: int, rho: float, rng) -> np.ndarray:
+def generate_noise(n_samples: int, n_features: int, rho: float, rng) -> np.ndarray:
     """
     生成符合 Σ_ij = rho^|i-j| 的噪声矩阵 E
     """
-    if rho == 0:
-        return rng.standard_normal((n_samples, n_features))
+    indices = np.arange(n_features)
+    cov_matrix = rho ** np.abs(indices[:, None] - indices[None, :])
 
-    noise = np.zeros((n_samples, n_features))
-    # 初始特征 e_1 ~ N(0, 1)
-    noise[:, 0] = rng.standard_normal(n_samples)
+    # 2. Cholesky分解
+    L = np.linalg.cholesky(cov_matrix)
 
-    # 递归生成后续特征 e_j = rho * e_{j-1} + sqrt(1 - rho^2) * w_j
-    # 这样生成的序列满足 e_j ~ N(0, 1) 且 Corr(e_i, e_j) = rho^|i-j|
-    scale = np.sqrt(1 - rho ** 2)
-    white = rng.standard_normal((n_samples, n_features))
+    # 3. 生成并变换
+    Z = rng.standard_normal((n_samples, n_features))
+    E = Z @ L.T
 
-    for j in range(1, n_features):
-        noise[:, j] = rho * noise[:, j - 1] + scale * white[:, j]
-
-    return noise
+    return E
 
 
 def generate_regression_data(n_samples: int = 200, n_features: List[int] = [300, 500],
@@ -77,7 +72,7 @@ def generate_regression_data(n_samples: int = 200, n_features: List[int] = [300,
         # C. 生成自相关噪声 E(m)
         # 这里直接调用你确认过的 AR(1) 噪声生成函数
         # 它保证了每一行噪声向量 e ~ N(0, Σ)，且 Σ_ij = 0.5^|i-j|
-        E_m = generate_ar_noise(n_samples, p, rho_val, rng)
+        E_m = generate_noise(n_samples, p, rho_val, rng)
 
         # D. 最终叠加: X(m) = X_sig(m) + E(m)
         # noise_level 用于整体控制 E 的强弱（通常设为 1.0）
@@ -124,8 +119,8 @@ def run_simulation_task(seed: int, config: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- 2. Baselines ---
     for name, Cls, params in [
-        ("AdaCoop", AdaCoop, config["lasso_params"]),
-        ("MSGLasso", MSGLasso, config["lasso_params"]),
+        ("AdaCoop", AdaCoop, config["ada_params"]),
+        ("MSGLasso", MSGLasso, config["msg_params"]),
         ("SLRFS", SLRFS, config["slrfs_params"])
     ]:
         try:

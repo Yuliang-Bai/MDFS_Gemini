@@ -15,6 +15,7 @@ def configure_for_multiprocessing(n_cores: int, inner_threads: int = 1) -> None:
         os.environ["MKL_NUM_THREADS"] = t
         os.environ["VECLIB_MAXIMUM_THREADS"] = t
         os.environ["NUMEXPR_NUM_THREADS"] = t
+        os.environ.setdefault("KMP_WARNINGS", "off")
 
 def worker_init() -> None:
     """

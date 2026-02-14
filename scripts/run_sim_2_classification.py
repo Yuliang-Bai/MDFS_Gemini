@@ -15,19 +15,19 @@ from src.utils.parallel import configure_for_multiprocessing, worker_init
 
 # 配置: 01 分布 (n_classes=2)
 CONFIG = {
-    "n_repeats": 20, "n_cores": 4,
+    "n_repeats": 20, "n_cores": 8,
     "n_samples": 200, "dims": [300, 300],
     "n_classes": 2, "noise": 1.0, "gamma": 0.7,
     "mdfs_params": {
         "latent_dim": 5, "view_latent_dim": 10,
         "encoder_struct": [[128, 64], [128, 64]],
         "decoder_struct": [[64, 128], [64, 128]],
-        "temperature": 0.5, "epochs": 200, "lr": 1e-2,
-        "lambda_sp": 0.1, "lambda_ent": 0.05
+        "temperature": 0.5, "epochs": 100, "lr": 5e-3,
+        "lambda_r": 5, "lambda_ent": 0.05, "lambda_sp": 0.5
     },
-    "smvfs_params": {"alpha": 0.5, "rho": 1.0, "max_iter": 50},
-    "hlrfs_params": {"beta": 1.0, "gamma": 0.5, "n_neighbors": 5},
-    "scfs_params": {"lambda1": 0.1, "lambda2": 0.1, "max_iter": 50}
+    "smvfs_params": {"alpha": 100, "rho": 0.1, "mu": 100, "inner_iter": 100, "max_iter": 100},
+    "hlrfs_params": {"beta": 1, "gamma": 100, "n_neighbors": 10, "r": 10, "max_iter": 100},
+    "scfs_params": {"lambda1": 100, "lambda2": 1, "rho": 10, "max_iter": 100}
 }
 
 configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)

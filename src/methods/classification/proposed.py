@@ -168,7 +168,7 @@ class MDFSClassifier(BaseMethod):
         if verbose:
             print(f"\n[{self.name}] Start Training (Epochs: {self.epochs})...")
             print(
-                f"{'Epoch':<6} | {'Tot_Loss':<10} | {'Cls_Loss':<10} | {'Rec_Loss':<10} | {'Ent_Loss':<10} | {'Recall':<8}")
+                f"{'Epoch':<6} | {'Tot_Loss':<10} | {'Cls_Loss':<10} | {'Rec_Loss':<10} | {'Ent_Loss':<10} | {'Sp_Loss':<10} | {'Recall':<8}")
             print("-" * 70)
 
         for epoch in range(1, self.epochs + 1):
@@ -216,7 +216,7 @@ class MDFSClassifier(BaseMethod):
 
                 if verbose:
                     print(
-                        f"{epoch:<6} | {total_loss.item():<10.4f} | {loss_c.item():<10.4f} | {recon_loss.item():<10.4f} | {loss_ent.item():<10.4f} | {metrics['recall_total']:<8.4f}")
+                        f"{epoch:<6} | {total_loss.item():<10.4f} | {loss_c.item():<10.4f} | {recon_loss.item():<10.4f} | {loss_ent.item():<10.4f} | {loss_sp.item():<10.4f} | {metrics['recall_total']:<8.4f}")
 
                 self.encoders.train();
                 self.compress_net.train();

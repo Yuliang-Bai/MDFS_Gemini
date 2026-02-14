@@ -17,26 +17,19 @@ from src.utils.parallel import configure_for_multiprocessing, worker_init
 # --- Configuration ---
 CONFIG = {
     "task_name": "Clustering_Simulation",
-    "n_repeats": 20,
-    "n_cores": 4,
-    "n_samples": 200,
-    "dims": [100, 100],
-    "n_clusters": 3,
+    "n_repeats": 20, "n_cores": 4, "n_samples": 200,
+    "dims": [300, 300], "n_clusters": 3,
     "mdfs_params": {
         "latent_dim": 5,
         "view_latent_dim": 10,
         "encoder_struct": [[128, 64], [128, 64]],
         "decoder_struct": [[64, 128], [64, 128]],
-        "epochs": 600,
-        "lr": 5e-2,
-        "lambda_r": 1.0,
-        "lambda_ent": 0.05,
-        "lambda_sp": 0.05,
-        "temperature": 0.7
+        "temperature": 0.5, "epochs": 100, "lr": 5e-3,
+        "lambda_r": 1.0, "lambda_ent": 0.05, "lambda_sp": 0.5
     },
-    "mcfl_params": {"n_clusters": 3, "gamma": 0.1, "max_iter": 20},
-    "mrag_params": {"n_clusters": 3, "k_neighbors": 5},
-    "nsgl_params": {"n_clusters": 3, "alpha": 0.1}
+    "mcfl_params": {"n_clusters": 3, "gamma1": 0.01, "gamma2": 10, "max_iter": 100},
+    "mrag_params": {"n_clusters": 3, "k_neighbors": 10, "alpha":1, "beta":100, "max_iter": 100},
+    "nsgl_params": {"n_clusters": 3, "k_neighbors": 5, "alpha": 1.0, "beta": 1.0, "lambda_": 0.1, "max_iter": 100}
 }
 
 configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)
@@ -124,15 +117,7 @@ if __name__ == "__main__":
     print(summary_df.to_string(index=False))
 
     # 5. 保存结果
-    results_dir = os.path.join(project_root, "results")
-    os.makedirs(results_dir, exist_ok=True)
-
-    # 保存汇总表格
-    save_path = os.path.join(results_dir, "sim_3_clu_summary.csv")
+    save_path = os.path.join(project_root, "results", "sim_3_clu_summary.csv")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     summary_df.to_csv(save_path, index=False)
-
-    # 保存原始数据 (Raw)
-    raw_path = os.path.join(results_dir, "sim_3_clu_raw.csv")
-    df.to_csv(raw_path, index=False)
-
     print(f"\nReport saved to: {save_path}")

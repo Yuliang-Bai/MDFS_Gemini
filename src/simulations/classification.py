@@ -5,19 +5,21 @@ from src.methods.classification.baselines import SMVFS, HLRFS, SCFS
 from src.utils.metrics import calculate_selection_metrics
 
 
-def generate_ar_noise(n_samples: int, n_features: int, rho: float, rng) -> np.ndarray:
+def generate_noise(n_samples: int, n_features: int, rho: float, rng) -> np.ndarray:
     """
     生成符合 Σ_ij = rho^|i-j| 的噪声矩阵 E (复用自 Regression)
     """
-    if rho == 0:
-        return rng.standard_normal((n_samples, n_features))
-    noise = np.zeros((n_samples, n_features))
-    noise[:, 0] = rng.standard_normal(n_samples)
-    scale = np.sqrt(1 - rho ** 2)
-    white = rng.standard_normal((n_samples, n_features))
-    for j in range(1, n_features):
-        noise[:, j] = rho * noise[:, j - 1] + scale * white[:, j]
-    return noise
+    indices = np.arange(n_features)
+    cov_matrix = rho ** np.abs(indices[:, None] - indices[None, :])
+
+    # 2. Cholesky分解
+    L = np.linalg.cholesky(cov_matrix)
+
+    # 3. 生成并变换
+    Z = rng.standard_normal((n_samples, n_features))
+    E = Z @ L.T
+
+    return E
 
 
 def generate_classification_data(n_samples: int = 200, n_features: List[int] = [300, 300],
@@ -77,7 +79,7 @@ def generate_classification_data(n_samples: int = 200, n_features: List[int] = [
         X_signal[:, idx_spec] += (1 - gamma) * (H_specs[i] @ Ws)
 
         # C. 噪声 E
-        E_m = generate_ar_noise(n_samples, p, rho_val, rng)
+        E_m = generate_noise(n_samples, p, rho_val, rng)
 
         # D. 叠加
         X_data[name] = X_signal + E_m * noise_level
