@@ -17,8 +17,8 @@ from src.utils.parallel import configure_for_multiprocessing, worker_init
 # --- Configuration ---
 CONFIG = {
     "task_name": "Clustering_Simulation",
-    "n_repeats": 20, "n_cores": 4, "n_samples": 200,
-    "dims": [300, 300], "n_clusters": 3,
+    "n_repeats": 20, "n_cores": 8, "n_samples": 200,
+    "dims": [300, 300], "n_clusters": 3,"noise_level": 1.0,
     "mdfs_params": {
         "latent_dim": 5,
         "view_latent_dim": 10,
@@ -27,9 +27,10 @@ CONFIG = {
         "temperature": 0.5, "epochs": 100, "lr": 5e-3,
         "lambda_r": 1.0, "lambda_ent": 0.05, "lambda_sp": 0.5
     },
-    "mcfl_params": {"n_clusters": 3, "gamma1": 0.01, "gamma2": 10, "max_iter": 100},
-    "mrag_params": {"n_clusters": 3, "k_neighbors": 10, "alpha":1, "beta":100, "max_iter": 100},
-    "nsgl_params": {"n_clusters": 3, "k_neighbors": 5, "alpha": 1.0, "beta": 1.0, "lambda_": 0.1, "max_iter": 100}
+    "mcfl_params": {"n_clusters": 3, "gamma1": 1, "gamma2": 100, "zeta": 1e-4, "max_iter": 100},
+    "mrag_params": {"n_clusters": 3, "k_neighbors": 20, "alpha": 2.0, "beta": 2.5, "max_iter": 100},
+    "nsgl_params": {"n_clusters": 3, "k_neighbors": 20, "alpha": 100, "beta": 0.1, "lambda_": 0.05,  "ortho_gamma": 1e2, "max_iter": 100}
+
 }
 
 configure_for_multiprocessing(CONFIG["n_cores"], inner_threads=1)
