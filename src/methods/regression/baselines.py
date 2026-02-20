@@ -233,7 +233,7 @@ class AdaCoop(BaseMethod):
 
                 # 使用 Lasso/ElasticNet 求解问题 [cite: 150]
                 # 这里使用固定的小 alpha 或简单的 CV 来加速内部循环
-                model = Lasso(alpha=0.1, max_iter=2000)  # 简化：实际应嵌套 CV 选 lambda
+                model = Lasso(alpha=0.1, max_iter=5000)  # 简化：实际应嵌套 CV 选 lambda
                 model.fit(X_aug, y_aug)
 
                 # 预测：在验证集上不使用增广矩阵，直接预测 [cite: 137]
@@ -270,7 +270,7 @@ class AdaCoop(BaseMethod):
             cv=5,
             random_state=42,
             n_jobs=1,
-            max_iter=3000
+            max_iter=5000
         )
         final_model.fit(X_final, y_final)
 
