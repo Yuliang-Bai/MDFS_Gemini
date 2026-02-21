@@ -1,10 +1,9 @@
 import sys
 import os
 import scipy.io
-import scipy.sparse
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
@@ -23,7 +22,6 @@ if project_root not in sys.path: sys.path.append(project_root)
 
 from src.utils.parallel import configure_for_multiprocessing
 
-# 限制底层线性代数库的嵌套线程数，防止多进程时 CPU 锁死
 configure_for_multiprocessing(n_cores=10, inner_threads=1)
 
 from src.methods.case_study.case_study_proposed import MDFSClassifier
@@ -31,25 +29,37 @@ from src.methods.case_study.case_study_baselines import SMVFS, HLRFS, SCFS
 
 
 # ==========================================
-# 独立的工作函数：用于处理单折交叉验证
+# 独立的工作函数：用于处理单次任务
 # ==========================================
-def run_single_fold(fold, train_index, test_index, view1, view2, y, methods_config):
-    print(f"[Worker] -> 开始处理第 {fold + 1}/10 折...")
+def run_single_task(task_id, train_index, test_index, view1, view2, y, methods_config):
+    # task_id 格式如 "Rep1-Fold5"
+    print(f"[Worker] -> 开始处理 {task_id} ...")
 
     X_train = {"view1": view1[train_index], "view2": view2[train_index]}
     X_test = {"view1": view1[test_index], "view2": view2[test_index]}
     y_train, y_test = y[train_index], y[test_index]
+
+    # 【稠密特征核心预处理】：StandardScaler
+    scaler_v1 = StandardScaler()
+    scaler_v2 = StandardScaler()
+
+    X_train["view1"] = scaler_v1.fit_transform(X_train["view1"])
+    X_test["view1"] = scaler_v1.transform(X_test["view1"])
+
+    X_train["view2"] = scaler_v2.fit_transform(X_train["view2"])
+    X_test["view2"] = scaler_v2.transform(X_test["view2"])
 
     fold_results = {}
 
     for name, ModelClass, params in methods_config:
         try:
             model = ModelClass(**params)
-            # 在并行模式下，关闭所有冗余的 verbose 输出以防控制台信息混乱
+            # 训练模型获取筛选特征 (MDFS 关闭 verbose)
             fit_result = model.fit(X_train, y_train, verbose=False) if name == "MDFS" else model.fit(X_train, y_train)
 
             selected_features = fit_result.selected_features
 
+            # 提取筛选出的特征并拼接
             X_train_concat = np.hstack((
                 X_train["view1"][:, selected_features["view1"]],
                 X_train["view2"][:, selected_features["view2"]]
@@ -59,54 +69,53 @@ def run_single_fold(fold, train_index, test_index, view1, view2, y, methods_conf
                 X_test["view2"][:, selected_features["view2"]]
             ))
 
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_concat)
-            X_test_scaled = scaler.transform(X_test_concat)
-
+            # 训练 SVM
             svm = SVC(kernel='linear', C=1.0, random_state=42)
-            svm.fit(X_train_scaled, y_train)
-            y_pred = svm.predict(X_test_scaled)
+            svm.fit(X_train_concat, y_train)
+            y_pred = svm.predict(X_test_concat)
 
+            # 计算准确率
             acc = accuracy_score(y_test, y_pred)
             fold_results[name] = acc
-            print(f"   [Fold {fold + 1}] {name} 筛选完成, Accuracy: {acc:.4f}")
+            print(f"   [{task_id}] {name} 筛选完成, Accuracy: {acc:.4f}")
 
         except Exception as e:
-            print(f"   [Fold {fold + 1}] {name} 运行出错: {e}")
+            print(f"   [{task_id}] {name} 运行出错: {e}")
             fold_results[name] = np.nan
 
-    return fold, fold_results
+    return task_id, fold_results
 
 
 def main():
     # ---------------- 1. 加载并处理数据 ----------------
-    print("正在加载数据...")
-    data = scipy.io.loadmat('data/bbcsport.mat')
+    print("正在加载 Handwritten 数据...")
+    data = scipy.io.loadmat('data/Handwritten.mat')
+
+    # 提取 View 1 (子视图1: 索引0) 和 View 5 (子视图5: 索引4)
     X_mat = data['X']
-    view1 = X_mat[0, 0].toarray() if scipy.sparse.issparse(X_mat[0, 0]) else X_mat[0, 0]
-    view2 = X_mat[1, 0].toarray() if scipy.sparse.issparse(X_mat[1, 0]) else X_mat[1, 0]
+    view1 = X_mat[0, 0].astype(np.float32)  # 216 维 轮廓相关性
+    view2 = X_mat[4, 0].astype(np.float32)  # 240 维 像素平均值
 
     y = data['y'].flatten()
     y = LabelEncoder().fit_transform(y)
 
-    n_samples, n_classes = len(y), len(np.unique(y))
-    print(f"数据加载完成: 样本数={n_samples}, 类别数={n_classes}")
+    n_samples_total, n_classes = len(y), len(np.unique(y))
+    print(f"数据整体加载完成: 总样本数={n_samples_total}, 类别数={n_classes}")
 
-    # ---------------- 2. 初始化参数 (已针对小样本优化) ----------------
+    # ---------------- 2. 初始化参数 (针对极小样本+稠密特征优化) ----------------
     mdfs_params = {
         "n_classes": n_classes,
-        "latent_dim": 5,
-        "view_latent_dim": 10,
-        # 【修改】大幅砍掉网络体积，增加 dropout 防止过拟合
+        "latent_dim": n_classes,
+        "view_latent_dim": 64,
         "encoder_struct": [[128, 64], [128, 64]],
         "decoder_struct": [[64, 128], [64, 128]],
         "dropout": 0.3,
-        "temperature": 0.5,
-        "epochs": 150,  # 降低迭代次数
+        "temperature": 1.0,
+        "epochs": 150,
         "lr": 2e-3,
-        "lambda_r": 0.5,  # 【修改】降低重构占比
+        "lambda_r": 1.0,
         "lambda_ent": 0.05,
-        "lambda_sp": 0.05  # 【修改】降低过强的稀疏惩罚
+        "lambda_sp": 0.1
     }
 
     smvfs_params = {"alpha": 100, "rho": 0.1, "mu": 100, "max_iter": 100}
@@ -120,33 +129,45 @@ def main():
         ("SCFS", SCFS, scfs_params)
     ]
 
-    # ---------------- 3. 并行执行 10 折交叉验证 ----------------
-    kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-    print("\n========== 启动并行 10 折交叉验证 (10 进程) ==========")
+    # ---------------- 3. 生成 10次重复 × 10折交叉验证 的任务队列 ----------------
+    tasks = []
 
-    # 获取所有的索引对
-    splits = list(kf.split(view1, y))
+    # 步骤 A：重复 10 次，每次分层随机抽取 200 个样本
+    sss = StratifiedShuffleSplit(n_splits=10, train_size=200, random_state=42)
 
-    # 使用 joblib 启动多进程并发 (n_jobs=10 表示同时启动 10 个进程跑这 10 折)
-    # 注意：如果你的内存或显存不足，可以把 n_jobs 降低到 5 或 2
+    for rep_idx, (sub_indices, _) in enumerate(sss.split(view1, y)):
+        y_sub = y[sub_indices]  # 抽出来的 200 个样本的标签
+
+        # 步骤 B：对这 200 个样本内部进行 10 折交叉验证
+        kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=rep_idx)
+
+        for fold_idx, (train_idx_rel, test_idx_rel) in enumerate(kf.split(np.zeros(200), y_sub)):
+            # 将 200 个样本内的相对索引 (0~199) 映射回全量数据集 (0~1999) 的绝对索引
+            train_idx_abs = sub_indices[train_idx_rel]
+            test_idx_abs = sub_indices[test_idx_rel]
+
+            task_name = f"Rep{rep_idx + 1}-Fold{fold_idx + 1}"
+            tasks.append((task_name, train_idx_abs, test_idx_abs))
+
+    print(f"\n========== 启动并行验证 (共 {len(tasks)} 个任务, 10 进程并发) ==========")
+
+    # 将 100 个任务全部送入并行池
     parallel_results = Parallel(n_jobs=10)(
-        delayed(run_single_fold)(
-            fold, train_idx, test_idx, view1, view2, y, methods_config
-        ) for fold, (train_idx, test_idx) in enumerate(splits)
+        delayed(run_single_task)(
+            task_name, train_idx, test_idx, view1, view2, y, methods_config
+        ) for task_name, train_idx, test_idx in tasks
     )
 
-    # ---------------- 4. 结果汇总 ----------------
-    # 初始化存放准确率的字典
+    # ---------------- 4. 汇总 100 次运行的整体结果 ----------------
     results_acc = {name: [] for name, _, _ in methods_config}
 
-    # 按照折的顺序将并发结果整理回来
-    parallel_results.sort(key=lambda x: x[0])
+    # 为了让打印好看一点，不用特意排序了，直接塞进去
     for _, fold_res in parallel_results:
         for name in results_acc.keys():
             results_acc[name].append(fold_res.get(name, np.nan))
 
     print("\n\n" + "=" * 60)
-    print(" >>> 实例分析最终结果 (10折完全并行 - BBCSport)")
+    print(" >>> 实例分析最终结果 (10次抽取200样本 × 10折交叉 - Handwritten)")
     print("=" * 60)
 
     summary_data = []
@@ -155,14 +176,16 @@ def main():
         valid_acc = acc_list[~np.isnan(acc_list)]
 
         if len(valid_acc) > 0:
-            mean_acc, std_acc, valid_folds = np.mean(valid_acc), np.std(valid_acc), len(valid_acc)
+            mean_acc = np.mean(valid_acc)
+            std_acc = np.std(valid_acc)
+            valid_folds = len(valid_acc)
         else:
             mean_acc, std_acc, valid_folds = 0.0, 0.0, 0
 
         summary_data.append({
             "Method": name,
             "Accuracy (Mean ± Std)": f"{mean_acc:.4f} ± {std_acc:.4f}",
-            "Valid Folds": f"{valid_folds}/10"
+            "Valid Runs": f"{valid_folds}/{len(tasks)}"
         })
 
     summary_df = pd.DataFrame(summary_data)
