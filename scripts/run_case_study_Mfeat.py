@@ -4,11 +4,11 @@ import scipy.io
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler, Normalizer
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
 from joblib import Parallel, delayed
-
+from sklearn.pipeline import Pipeline
 # ==========================================
 # 0. 修复环境路径 & 引入并行优化
 # ==========================================
@@ -105,17 +105,17 @@ def main():
     # ---------------- 2. 初始化参数 (针对极小样本+稠密特征优化) ----------------
     mdfs_params = {
         "n_classes": n_classes,
-        "latent_dim": n_classes,
-        "view_latent_dim": 64,
-        "encoder_struct": [[128, 64], [128, 64]],
-        "decoder_struct": [[64, 128], [64, 128]],
+        "latent_dim": 5,
+        "view_latent_dim": 16,
+        "encoder_struct": [[64], [64]],
+        "decoder_struct": [[64], [64]],
         "dropout": 0.3,
-        "temperature": 1.0,
-        "epochs": 150,
-        "lr": 2e-3,
+        "temperature": 0.5,
+        "epochs": 400,
+        "lr": 5e-3,
         "lambda_r": 1.0,
         "lambda_ent": 0.05,
-        "lambda_sp": 0.1
+        "lambda_sp": 0.5
     }
 
     smvfs_params = {"alpha": 100, "rho": 0.1, "mu": 100, "max_iter": 100}
@@ -133,7 +133,7 @@ def main():
     tasks = []
 
     # 步骤 A：重复 10 次，每次分层随机抽取 200 个样本
-    sss = StratifiedShuffleSplit(n_splits=10, train_size=200, random_state=42)
+    sss = StratifiedShuffleSplit(n_splits=10, train_size=300, random_state=42)
 
     for rep_idx, (sub_indices, _) in enumerate(sss.split(view1, y)):
         y_sub = y[sub_indices]  # 抽出来的 200 个样本的标签
@@ -141,7 +141,7 @@ def main():
         # 步骤 B：对这 200 个样本内部进行 10 折交叉验证
         kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=rep_idx)
 
-        for fold_idx, (train_idx_rel, test_idx_rel) in enumerate(kf.split(np.zeros(200), y_sub)):
+        for fold_idx, (train_idx_rel, test_idx_rel) in enumerate(kf.split(np.zeros(300), y_sub)):
             # 将 200 个样本内的相对索引 (0~199) 映射回全量数据集 (0~1999) 的绝对索引
             train_idx_abs = sub_indices[train_idx_rel]
             test_idx_abs = sub_indices[test_idx_rel]
